@@ -1,63 +1,60 @@
 package org.example;
 
-import org.apache.spark.Partition;
-import org.apache.spark.TaskContext;
-import org.apache.spark.api.java.JavaRDD;
+import lombok.val;
+import lombok.var;
+import org.apache.hadoop.shaded.org.eclipse.jetty.websocket.common.frames.DataFrame;
 import org.apache.spark.sql.*;
 
-import java.util.Iterator;
 import java.util.List;
-
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class Main {
     public static void main(String[] args) {
         // 创建 SparkSession
         SparkSession spark = SparkSession.builder()
+                .enableHiveSupport()
                 .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
                 .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
                 .appName("Create Delta Table")
                 .master("local")
                 .getOrCreate();
 
-        // 设置 Delta Lake 表的存储路径
-        String deltaPath = "../data";
+        spark.sql("DROP DATABASE IF EXISTS data CASCADE;");
+        spark.sql("CREATE DATABASE data");
 
-        // 创建示例数据帧
-        Dataset<Row> data = spark.range(1, 100000000)
-                .selectExpr("id", "id * 2 as value");
+        spark.sql("CREATE TABLE data.customer(id INT, name STRING) PARTITIONED BY (state STRING, city STRING);");
+        spark.sql("INSERT INTO data.customer PARTITION (state = 'CA', city = 'Fremont') VALUES (100, 'John');");
+        spark.sql("INSERT INTO data.customer PARTITION (state = 'CA', city = 'Fremont') VALUES (200, 'Marry');");
+        spark.sql("INSERT INTO data.customer PARTITION (state = 'CA', city = 'Fremont') VALUES (100, 'Alan');");
+        spark.sql("INSERT INTO data.customer PARTITION (state = 'AZ', city = 'Peoria') VALUES (200, 'Alex');");
+        spark.sql("INSERT INTO data.customer PARTITION (state = 'AZ', city = 'Peoria') VALUES (300, 'Daniel');");
 
+        Dataset<Row> customer=spark.read().table("data.customer");
+        customer.write().format("delta")
+                .partitionBy("state","city")
+        .mode("overwrite").parquet("data.db\\customer");
 
-        // 写入 Delta Lake 表
-        org.apache.spark.sql.DataFrameWriter<Row> dataFrameWriter = data.write()
-                .format("delta");
-        dataFrameWriter.mode("overwrite").save(deltaPath);;
+        String basepath = "D:\\Desktop\\doris\\Demo\\";
+        String dbname = "data";
+        String tablename = "customer";
 
-        // 读取 Delta Lake 表数据
-        Dataset<Row> deltaData = spark.read()
-                .format("delta")
-                .load(deltaPath);
-
-        // 显示 Delta Lake 表数据
-        deltaData.show();
-        int n =deltaData.rdd().getNumPartitions();
-        System.out.println(n);
-
-        if (deltaData != null) {
-            // 将 Delta Lake 表转换为 RDD
-            // 注意：需要导入 org.apache.spark.api.java.JavaRDD;
-            JavaRDD<Row> deltaRDD = deltaData.toJavaRDD();
-
-            // 获取 Delta Lake 表的所有切片
-            List<Partition> partitions = deltaRDD.partitions();
-            int i =0;
-            // 遍历每个切片
-            for (Partition partition : partitions) {
-                i++;
-                System.out.println("第"+i+"个分片\n");
+        Dataset<Row> splits=spark.sql("SHOW PARTITIONS data.customer;");
+        List<Row> data=splits.collectAsList();
+        int i = 0;
+        for(Row row : data){
+            System.out.println(row.getString(0));
+            String path =basepath +dbname+".db\\"+tablename+"\\";
+            String[] dir = row.getString(0).split("/");
+            for (String s : dir) {
+                path += s + "\\";
             }
-        } else {
-            System.out.println("Failed to load Delta Lake table.");
-        }
+            path+="*";
+            Dataset<Row> dataframe = spark.read().parquet(path);
+            dataframe.show();
+            i++;
+        };
+        System.out.println("Total Partitions: " + i);
+        splits.show();
         spark.stop();
     }
 }
